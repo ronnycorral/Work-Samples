@@ -1,0 +1,136 @@
+- hosts: clair
+  become: true
+  tags:
+    - ec2pl
+    - clair
+
+  vars:
+    ssl_cert: _.aws.corral.com
+    postgres_password: 'ChangeMe'
+    postgres_user: 'clair'
+    postgres_db: 'clair'
+    docker_ip: '172.18.0.1'
+
+  pre_tasks:
+
+    - name: Setup Directory structure for Docker volume
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: 0777
+      with_items:
+        - /data/clair
+        - /data/web/html/json
+        - /data/web/json
+        - /data/postgres
+
+    - name: Deploy custom scripts
+      copy:
+        dest: "/data/clair/{{ item }}"
+        src: "files/clair/{{ item }}"
+        owner: root
+        group: root
+        mode: 0755
+      with_items:
+        - generatereport.py
+        - getclairrowcounts.py
+        - gettags.py
+        - maketempindex.sh
+
+    - name: Setup opt config directories
+      file:
+        path: /opt/config/{{ item }}
+        state: directory
+        owner: root
+        group: root
+        mode: 0755
+      with_items:
+        - clair
+        - postgres
+        - clairctl
+
+    - name: Clair config
+      template:
+        src: templates/clair/config.yml.j2
+        dest: /opt/config/clair/config.yml
+        owner: root
+        group: root
+        mode: 0644
+
+    - name: Clair DB config
+      template:
+        src: templates/clair/clairdb.ini.j2
+        dest: /opt/config/clair/clairdb.ini
+        owner: root
+        group: root
+        mode: 0644
+
+    - name: Clairctl config
+      template:
+        src: templates/clair/clairctl.yml.j2
+        dest: /opt/config/clairctl/clairctl.yml
+        owner: root
+        group: root
+        mode: 0644
+
+  roles:
+
+    - role: apache
+      apache_mods:
+        - proxy
+        - proxy_http
+        - rewrite
+        - ssl
+        - remoteip
+        - headers
+
+    - role: apachessl
+      apachessl_certs:
+        - "_.aws.corral.com"
+      s3_account: corral
+
+    - role: dockerdeploy
+      deploy_image: postgres
+      deploy_owner: corral
+      deploy_tag: 11.4
+      deploy_names: postgres
+      deploy_docker_args: "--rm -p 0.0.0.0:5432:5432 -e POSTGRES_PASSWORD='{{ postgres_password }}' -e POSTGRES_USER='{{ postgres_user }}' -e POSTGRES_DB='{{ postgres_db }}' -v /data/postgres:/var/lib/postgresql/data --hostname postgres-{{ shorthostname }}"
+
+    - role: dockerdeploy
+      deploy_image: clair
+      deploy_owner: corral
+      deploy_tag: latest
+      deploy_names: clair
+      deploy_apacheconf: templates/clair/apache.conf.j2
+      deploy_docker_args: "--rm -p 0.0.0.0:6060-6061:6060-6061 -v /tmp:/tmp --hostname clair-{{ shorthostname }}"
+      deploy_cmd: "--log-level=debug --config /config/config.yml"
+
+    - role: dockerdeploy
+      deploy_image: clairctl
+      deploy_owner: corracorral
+      deploy_tag: latest
+      deploy_names: clairctl
+      deploy_docker_args: "--rm -p 0.0.0.0:44480:44480 -v /data/web:/reports -v /var/run/docker.sock:/var/run/docker.sock:ro -v /tmp:/tmp -v /opt/config/clairctl:/home/clairctl --hostname clairctl-{{ shorthostname }}"
+
+  tasks:
+
+    - name: Install cron to run clair reports
+      copy:
+        src: files/clair/clair-cron
+        dest: /etc/cron.d/clair
+        owner: root
+        group: root
+        mode: 0644
+
+    # needed for postgres connectivity
+    - name: install python-psycopg2
+      apt: pkg={{ item }} state=present
+      with_items:
+        - python-psycopg2
+
+    - name: Run report creation script at start up
+      shell: nohup /data/clair/generatereport.py < /dev/null >> /data/clair/createreports.log 2>&1 &
+      environment:
+         - PYTHONUNBUFFERED: 1
