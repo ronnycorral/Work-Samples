@@ -1,5 +1,5 @@
-#Automate Docker Container Security Scans Using Clair
-###Ron Corral
+# Automate Docker Container Security Scans Using Clair
+### Ron Corral
 
 I automated security scans for the docker containers in a registry and reports on the results.
 
